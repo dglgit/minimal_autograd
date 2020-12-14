@@ -1,4 +1,4 @@
-from operator import add
+import operator
 import numpy as np
 global_track=True
 def list_mul(x,y):
@@ -19,7 +19,7 @@ def lrelu(x,c):
   negative=(x.item<0).astype(int)
   return x*(negative+inv)
 def lreu_c_back(ob,context):
-  ob.grad=ob.grad*(context*(abs((x.item<0).astype(int)-1)))
+  ob.grad=ob.grad*(context*(abs((context.item<0).astype(int)-1)))
 def relu_back(ob,context):
   ob.grad=ob.grad*(context.item<0).astype(int)
 def lrelu_back(ob,context):
@@ -28,12 +28,48 @@ def lrelu_back(ob,context):
   ob.grad=ob.grad*(inv+negative)
 def mm(a,b,do_grad=False):
   result=tensor([[sum(a[i]*b[:,j]) for j in range(b.shape[1])] for i in range(a.shape[0])])
-  if do_grad:
-    print('y')
-    result.parents=(a,b)
-    a.grads.insert(0,(matmul_back,b))
-    b.grads.insert(0,(rmatmul_back,a))
+def sum_to(tens,axis,new_dim):
+  idx=[None for i in range(len(tens.shape))]
+  idx[new_dim]=slice(None)
+def bmm_back(ob,context):
+  ob.grad=bmm(ob.grad,np.stack([i.T for i in context]))
+def rbmm_back(ob,context):
+  ob.grad=bmm(np.stack([i.T for i in context]),ob.grad)
+def bmm(a,b):
+  result=tensor(np.stack([mm(a[i],b[i]) for i in range(len(a))]))
+  if global_track:
+    a.grads.update({result.id:(b,bmm_back)})
+    b.grads.update({result.id:(a,rbmm_back)})
+    result.parents=tuple(filter(lambda x: x.requires_grad,(a,b)))
+    result.requires_grad=len(result.parents)>0
+    return result
+  result.requires_grad=False
+  result.parents=()
   return result
+
+def sum_compress(thing,dim,new_length):
+  idx=[slice(None) for i in range(len(thing.shape))]
+  idx[dim]=slice(0,new_length)
+  starting=thing[idx]
+  for i in range(thing.shape[dim]//new_length-1):
+    start=new_length
+    idx=[slice(None) for i in range(len(thing.shape))]
+    idx[dim]=slice(start,start+new_length)
+    starting+=thing[idx]
+    start+=new_length
+  if global_track:
+    thing.grads.update({id(starting):(thing.shape,resize_back)})
+    thing.parents=(thing,)
+  else:
+    thing.parents=()
+  thing.requires_grad=len(thing.parents)>0
+  return thing
+
+def resize_back(ob,context):
+  for i in range(len(context)):
+    if context[i]!=ob.grad.shape[i]:
+      ob.grad=sum_compress(ob.grad,i,context[i])
+
 def rmatmul_back(ob, context):
   if isinstance(context,tensor):
     #print(ob.grad.shape,context.item.T.shape)
@@ -52,7 +88,8 @@ def div_back(ob,context):
 #TODO transpose backward should transpose all the grads that come after it i think
 #reshape backward has to reshape all the new gradients to fit the original tensor
 #use numpy or tensor.item when you don't want gradients tracked
-
+def add_back(ob,*args):
+    pass
 def sigmoid(x):
   if isinstance(x,tensor):
     result=1/(1+np.exp(-x.item))
@@ -94,8 +131,7 @@ def rdiv_back(ob,context):
   ob.grad=num*-(1/(denom**2))*ob.grad
 def div_grad(ob,context):
   ob.grad=ob.grad/context
-matmul_grads=[matmul_back, rmatmul_back]
-div_grads=[div_back,matmul_grads]
+
 ###############################
 class placeholder_list:
   def __init__(self,data=()):
@@ -116,9 +152,11 @@ class placeholder_list:
     return self.item.__iter__()
   def insert(self,*args):
     pass
+  def update(self,*args):
+    pass
 
-def create_container(mutable=True,*data):
-  return list(data) if mutable else placeholder_list()
+def create_container(data=[],mutable=True):
+  return data if mutable else placeholder_list(data)
 def find_needy(*tensors):
   ldict={tensors[i]:i for i in range(len(tensors))}
   result=[]
@@ -132,11 +170,19 @@ def handle_op(result, *others, grads=[]):
   if global_track:
     #gradsc=grads*((len(others)-len(grads))*2)
     parents=get_needs_grad(others)
+    out=tensor(result,parents=parents,requires_grad=len(parents)>0)
     for i in range(len(grads)):
-      others[i].grads.append(grads[i])
+      others[i].grads.update({out.id:grads[i]})
   else:
-    parents=()
-  return tensor(result,parents=parents,requires_grad=len(parents)>0)
+    tensor(result,parents=(),requires_grad=False)
+  
+def mseloss(pred,yhat):
+  assert pred.shape==yhat.shape
+  if len(pred.shape)>2:
+    result=(pred.item-yhat.item)/pred.shape[0]
+  else:
+    result=pred.item-yhat.item
+  return result
 #order matters grads
 matmul_grads=[matmul_back,rmatmul_back]
 div_grads=[div_back,rdiv_back]
@@ -151,7 +197,7 @@ class tensor:
       self.requires_grad=False
     self.grad=0
     self.gradv=0
-    self.grads=create_container(requires_grad)
+    self.grads=create_container(data={},mutable=requires_grad)
     self.tensors=[]
     self.parents=parents
     #self.children=[]
@@ -173,7 +219,7 @@ class tensor:
     print('rmul')
     return handle_op(other.item*self.item,self,grads=[(mul_back,other)])
   def __add__(self,other):
-    if type(other) in native_python_types:
+    if not isinstance(other,tensor):
       return handle_op(self.item*other,self,grads=[])
     return handle_op(self.item*other.item,self,other,grads=[])
   def backward(self,incoming_grads=[]):#incoming grads should be list of tuples
@@ -195,57 +241,45 @@ class tensor:
   def backward2(self,incoming_grad=None,child_id=None):
     self.grad=None
     if incoming_grad is not None:
-      self.grad=0
-      self.grad+=incoming_grad
-      for f,i in self.grads:
-        f(self,i)
+      self.grad=incoming_grad
+      context,func=self.grads[child_id]
+      func(self,context)
     elif len(self.grads)>0:
-      self.grad=self.grads[0][1]
+      self.grad=self.grads.values()[0][-1]
     for parent in self.parents:
-      parent.backward2(self.grad)
+      parent.backward2(self.grad,self.id)
     if self.grad is not None:
       self.gradv+=self.grad
   def t(self):
     if self.requires_grad:
       self.grads.insert(0,(transpose_back,1))
     return tensor(self.item.T)
-  def flatten(self):
-    return [[j for j in i] for i in self.item]
   def __div__(self, other):
-    result=self.item/other
-    self.grads.insert(0,(mul_back,1/other))
-    return tensor(result,parents=(self,other))
+    if not isinstance(other,tensor):
+      return handle_op(self.item/other,self,grads=[(other, div_back)])
+    return handle_op(self.item/other.item,self,other,grads=[(other, div_back),(self,rdiv_back)])
   def __sub__(self,other):
-    if self.requires_grad:
-      result=tensor(self.item-other,parents=(self,other))
-    else:
-      result=tensor(self.item-other)
-    return result
+    if not isinstance(other,tensor):
+      return handle_op(self.item-other,self,grads=[(other, div_back)])
+    return handle_op(self.item-other.item,self,other,grads=[(other, div_back),(self,rdiv_back)])
   def __rsub__(self,other):
-    result=tensor(other-self.item,parents=(self,other))
-    return result
+    if not isinstance(other,tensor):
+      return handle_op(other-self.item,self,grads=[(other, add_back)])
+    return handle_op(other.item-self.item,self,other,grads=[(other,add_back),(self,add_back)])
   def __radd__(self,other):
-    result=tensor(other+self.item)
-    return result
+    if not isinstance(other,tensor):
+      return handle_op(other+self.item,self,grads=[(other, add_back)])
+    return handle_op(other.item+self.item,self,other,grads=[(other,add_back),(self,add_back)])
   def __matmul__(self,other):
-    result=mm(self,other)
-    print('yeet')
-    if self.requires_grad:
-      self.grads.insert(0,(matmul_back, other))
-    if other.requires_grad:
-      other.grads.insert(0,(rmatmul_back, self))
-      #self.tensors.insert(0,other)
-    return tensor(result,parents=(self,other))
+    if not isinstance(other,tensor):
+      return handle_op(mm(self.item,other),self,grads=[(other, matmul_back)])
+    return handle_op(mm(self.item,other.item),self,other,grads=[(other, matmul_back),(self,rmatmul_back)])
   def __rmatmul__(self,other):
-    print('rmatmul')
-    result=tensor(mm(other,self,self.requires_grad))
-    if self.requires_grad:
-      self.grads.insert((rmatmul_back,other))
-    return result
+    return handle_op(mm(other, self.item),self,grads=[(other, rmatmul_back)])
   def __pow__(self, other):
-    result=self.item**other
-    self.grads.insert(0,(pow_back,other))
-    return tensor(result,parents=(self,other))
+    if not isinstance(other,tensor):
+      return handle_op(self.item**other,self,grads=[(other, pow_back)])
+    return handle_op(self.item**other.item,self,other,grads=[(other, pow_back),(self,rpow_back)])
   def __getitem__(self,i):
     return self.item[i]
   def wipe(self):
@@ -263,8 +297,15 @@ class tensor:
   def deactivate_(self):
     self.grads=placeholder_list()
     self.requires_grad=False
-  def reshape(self):
-    self.grads.insert(0,(reshape_back,self.item.shape))
+  def pause(self):
+    self.grads=placeholder_list(self.grads)
+    self.requires_grad=False
+  def resume(self):
+    self.grads=self.grads.data
+    self.requires_grad=True
+  def reshape(self,*new_shape):
+    result=tensor(self.item.reshape(*new_shape),parents=(self),requries_grad=self.requires_grad)
+    self.grads.update({result.id:(self.shape,reshape_back)})
   def __str__(self):
     return str(self.item)
   def __repr__(self):
@@ -277,6 +318,8 @@ class tensor:
     return self*-1
   def astype(self,t):
     self.item=self.item.astype(t)
+  def resize(self,*shape):
+    return tensor(np.resize(self.item,shape))
 def randn(*shape,requires_grad=False):
   return tensor(np.random.randn(*shape),requires_grad=requires_grad)
 class no_grad:
@@ -285,17 +328,14 @@ class no_grad:
   def __enter__(self):
     global_track=False
   def __exit__(self,*args):
+    if args[0] is not None:
+      print(args)
+      raise
     global_track=True
-a=randn(2,3,requires_grad=True)
-b=randn(2,3,requires_grad=True)
-dud=placeholder_list([2,3,4])
-print(list(dud),type(list(dud)))
-print('a')
-print(a)
-print('b')
-print(b)
-c=a*b
-print('c')
-print(c)
-print(b.grads)
-print(type(b[0][0]))
+
+if __name__ == '__main__':
+  a=randn(3,3,requires_grad=True)
+  b=randn(3,3,requires_grad=True)
+  c=randn(6,6,6)
+  print(c)
+  print(sum_compress(c,dim=1,new_length=2).shape)
