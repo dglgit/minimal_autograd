@@ -3,10 +3,7 @@ import numpy as np
 import random
 from big_variables import *
 global_track=True
-global_amount=a.ids
-def yeet():
-  print(global_amount)
-yeet()
+
 
 def list_mul(x,y):
   return list(map(add,x,y))
@@ -219,8 +216,8 @@ class tensor(list):
   def __mul__(self, other):
     print('mul')
     if not isinstance(other,tensor):
-      return handle_single_op(self.item*other,self,other,grads=[(mul_back,other)])
-    return handle_op(self.item*other.item,self,other,grads=[(mul_back,other.item),(mul_back,self.item)])
+      return handle_single_op(self.item*other,self,other,grads=[(other,mul_back)])
+    return handle_op(self.item*other.item,self,other,grads=[(other.item,mul_back),(self.item,mul_back)])
   def __rmul__(self,other):
     print('rmul')
     return handle_single_op(other*self.item,self,other,grads=[(mul_back,other)])
@@ -244,8 +241,9 @@ class tensor(list):
     self.grad=None
     print('back',self,'back')
     if incoming_grad is not None:
+      #None happens if the tensor has no children. This could be the tensor where backward is called
+      #if incomiing grad is not None, that means that it inherits its child's grad and adds to it, performing the chain rule
       self.grad=incoming_grad
-      #print(incoming_grad,'ahhfhsdbfhs')
       context,func=self.grads[child_id]
       func(self,context)
       del self.grads[child_id]
@@ -253,12 +251,14 @@ class tensor(list):
       self.grad=1
       context,func=self.grads[child_id]
       func(self,context)
+      if self.grad is 1:
+        #check that the gradient actually did something
+        self.grad=None
       del self.grads[child_id]
-    print(self.grad)
-    print('###############'*3)
+    #print(self.grad)
+    #print('###############'*3)
     for parent in self.parents:
       parent.backward2(self.grad,self.id)
-      
     if self.grad is not None:
       self.gradv+=self.grad
   def t(self):
@@ -270,6 +270,8 @@ class tensor(list):
     if not isinstance(other,tensor):
       return handle_single_op(self.item/other,self,other,grads=[(other, div_back)])
     return handle_op(self.item/other.item,self,other,grads=[(other, div_back),(self,rdiv_back)])
+  def __rtruediv__(self,other):
+    return handle_op(other/self.item,self,grads=[(other,rdiv_back)])
   def __sub__(self,other):
     if not isinstance(other,tensor):
       return handle_single_op(self.item-other,self,other,grads=[(other, add_back)])
@@ -287,7 +289,7 @@ class tensor(list):
       return handle_single_op(np.matmul(self.item,other),self,other,grads=[(other, matmul_back)])
     return handle_op(np.matmul(self.item,other.item),self,other,grads=[(other, matmul_back),(self,rmatmul_back)])
   def __rmatmul__(self,other):
-    return handle_single_op(mm(other, self.item),self,other,grads=[(other, rmatmul_back)])
+    return handle_single_op(np.matmul(other, self.item),self,grads=[(other, rmatmul_back)])
   def __pow__(self, other):
     if not isinstance(other,tensor):
       return handle_single_op(self.item**other,self,other,grads=[([other,self.item], pow_back)])
@@ -362,3 +364,37 @@ class no_grad:
       print(args)
       raise
     global_track=True
+print(__name__)
+if __name__ == '__main__':
+  a=randn(3,3,requires_grad=True)
+  b=randn(3,3,requires_grad=True)
+  c=randn(6,6,6)
+  #print(c)
+  #print(sum_compress(c,dim=1,new_length=2).shape)
+  w2=randn(2,3)
+  a=randn(2,3,requires_grad=True)
+  target=randn(2,7,requires_grad=False)
+  #pred=model(a)
+  w=randn(3,7)
+  pred=(a*w2)@w
+  loss=mseloss(pred,target)
+  print('w',w)
+  print('################')
+  print('a',a)
+  print('###############')
+  print('target',target)
+  print('###############')
+  print('pred',pred)
+  print('###############')
+  print('loss', loss)
+  print('###############')
+  print('###############')
+  #print(loss,'loss\npreds', list(pred.grads.keys())[0])
+  
+  #print(loss.item==list(pred.grads.keys())[0].item)
+  #print(loss)
+  loss.backward2()
+  print(a.gradv,'a')
+  print('gfhsadgfhdsbfhasg')
+  print(mm(loss,w.item.T)*w2)
+  print()
