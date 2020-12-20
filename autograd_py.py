@@ -160,7 +160,7 @@ def handle_op(result, *others, grads=[]):
     out=tensor(result,parents=parents,requires_grad=len(parents)>0)
     for i in range(len(grads)):
       others[i].grads.update({out.id:grads[i]})
-    return tensor(result,parents=parents,requires_grad=len(parents)>0)
+    return out
   else:
     return tensor(result,parents=(),requires_grad=False)
 def handle_single_op(result, *others, grads=[]):
@@ -208,7 +208,7 @@ class tensor(list):
     self.shape=self.item.shape
     self.T=self.item.T
     #print(global_amount)
-    self.id=id(self.requires_grad)#(id(self),)
+    self.id=id(self)#(id(self),)
   def size(self):
     return self.item.shape
   def col(self,col_num):
