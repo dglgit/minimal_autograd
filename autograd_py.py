@@ -1,10 +1,19 @@
 import operator
 import numpy as np
 import random
-from big_variables import *
+import time
+def timer(func,steps=1):
+  times=[]
+  for i in range(steps):
+    start=time.time()
+    func()
+    stop=time.time()
+    times.append(stop-start)
+  return sum(times)/len(times)
+#from big_variables import *
 global_track=True
-
-
+def get_by_id(address):
+  return [x for x in globals().values() if id(x)==address]
 def list_mul(x,y):
   return list(map(add,x,y))
 ndarray=type(np.array([1]))
@@ -15,6 +24,16 @@ def return_array(x):
     return x.item
   else:
     return x
+def handle_op(result, *others, grads=[]):
+  if global_track:
+    parents=get_needs_grad(others)
+    out=tensor(result,parents=parents,requires_grad=len(parents)>0)
+    for i in range(len(grads)):
+      others[i].grads.update({out.id:grads[i]})
+    return out
+  else:
+    return tensor(result,parents=(),requires_grad=False)    
+print(get_by_id(id('yeet')),'yfdghsfbhfbhdsfhd')
 def relu(x):
   negative=(x.item<0).astype(int)
   return x*negative
@@ -31,11 +50,18 @@ def lrelu_back(ob,context):
   negative=(context.item<0).astype(int)
   ob.grad=ob.grad*(inv+negative)
 def mm(a,b,do_grad=False):
-  return np.matmul(*map(return_array,(a,b)))
-  
-def sum_to(tens,axis,new_dim):
-  idx=[None for i in range(len(tens.shape))]
-  idx[new_dim]=slice(None)
+  if isinstance(a,tensor) or isinstance(b,tensor):
+    args=(a,b)
+    mat_grads=[(b,matmul_back),(a,rmatmul_back)]
+    parents=tuple(filter(lambda x:x.requires_grad,args))
+    result=tensor(np.matmul(*map(return_array,(a,b))),requires_grad=len(parents)>0,parents=parents)
+    for i in range(2):
+      if isinstance(args[i],tensor):
+        args[i].grads.update({result.id:mat_grads[i]})
+    return result
+  else:
+    return np.matmul(a,b)
+
 def bmm_back(ob,context):
   ob.grad=bmm(ob.grad,context.swapaxes(-1,-2))
 def rbmm_back(ob,context):
@@ -59,7 +85,7 @@ def sum_compress(thing,dim,new_length):
   starting=thing[idx]
   for i in range(thing.shape[dim]//new_length-1):
     start=new_length
-    idx=[slice(None) for i in range(len(thing.shape))]
+    #idx=[slice(None) for i in range(len(thing.shape))]
     idx[dim]=slice(start,start+new_length)
     starting+=thing[idx]
     start+=new_length
@@ -79,7 +105,11 @@ def resize_back(ob,context):
 def rmatmul_back(ob, context):
   if isinstance(context,tensor):
     #print(ob.grad.shape,context.item.T.shape)
-    ob.grad=np.matmul(context.item.swapaxes(-1,-2),ob.grad)
+    try:
+      ob.grad=np.matmul(context.item.swapaxes(-1,-2),ob.grad) 
+    except:
+      print(context,context.shape)
+      raise
   else:
     ob.grad=mm(context.swapaxes(-1,-2),ob.grad)
 def matmul_back(ob,context):
@@ -98,8 +128,9 @@ def add_back(ob,*args):
     pass
 def sigmoid(x):
   if isinstance(x,tensor):
-    result=tensor(1/(1+np.exp(-x.item)))
+    result=tensor(1/(1+np.exp(-x.item)),requires_grad=x.requires_grad)
     x.grads.update({result.id:(x.item,sigmoid_back)})
+    result.parents=(x,)
     return result
   else:
     return 1/(1+np.exp(x))
@@ -120,7 +151,7 @@ def swapaxes_back(ob,context):
 def rdiv_back(ob,context):
   num,denom=context
   ob.grad=num*-(1/(denom**2))*ob.grad
-def div_grad(ob,context):
+def div_back(ob,context):
   ob.grad=ob.grad/context
 
 ###############################
@@ -147,6 +178,8 @@ class placeholder_list:
     pass
   def __len__(self):
     return len(self.item)
+  def __getitem__(self,x):
+    return self.item[x]
 
 def create_container(data=[],mutable=True):
   return data if mutable else placeholder_list(data)
@@ -163,16 +196,6 @@ def handle_op(result, *others, grads=[]):
     return out
   else:
     return tensor(result,parents=(),requires_grad=False)
-def handle_single_op(result, *others, grads=[]):
-  if global_track:
-    parents=get_needs_grad(others)
-    out=tensor(result,parents=parents,requires_grad=len(parents)>0)
-    #others[0].grads.update({out:(others[1],grads[0])})
-    for i in range(len(grads)):
-      others[i].grads.update({out.id:grads[i]})
-    return tensor(result,parents=parents,requires_grad=len(parents)>0)
-  else:
-    return tensor(result,parents=(),requires_grad=False)
 handle_single_op=handle_op
 def mseloss_back(ob,context):
   ob.grad=ob.grad*context
@@ -186,13 +209,17 @@ def mseloss(pred,yhat):
     result=(pred-yhat)
   pred.grads.update({result.id:(result.item,mseloss_back)})
   return result
- 
-#order matters grads
-matmul_grads=[matmul_back,rmatmul_back]
-div_grads=[div_back,rdiv_back]
-native_python_types=[int,float,type(1j)]
-
-#TODO turn grads attribute to dictionary with {id(child):grad}
+def exp_back(ob,context):
+  ob.grad=1/ob.grad
+def exp(x):
+  if isinstance(x,tensor):
+    result=tensor(np.exp(x.item),requires_grad=x.requires_grad)
+    result.parents=(x,) if x.requires_grad else ()
+    x.grads.update({result.id:(None,exp_back)})
+    return result
+  else:
+    return np.exp(x)
+  ob.grad=ob.grad*(1/context[0])/context[1]
 
 class tensor(list):
   def __init__(self, data, requires_grad=False, parents=()):
@@ -208,7 +235,7 @@ class tensor(list):
     self.shape=self.item.shape
     self.T=self.item.T
     #print(global_amount)
-    self.id=id(self)#(id(self),)
+    self.id=id(self)
   def size(self):
     return self.item.shape
   def col(self,col_num):
@@ -222,9 +249,10 @@ class tensor(list):
     print('rmul')
     return handle_single_op(other*self.item,self,other,grads=[(mul_back,other)])
   def __add__(self,other):
+    print('add',isinstance(other,tensor))
     if not isinstance(other,tensor):
-      return handle_single_op(self.item+other,self,other,grads=[add_back])
-    return handle_op(self.item+other.item,self,other,grads=[add_back]*2)
+      return handle_single_op(self.item+other,self,grads=[(other,add_back)])
+    return handle_op(self.item+other.item,self,other,grads=[(other,add_back),(self,add_back)])
   def backward(self,incoming_grads=[]):#incoming grads should be list of tuples
     self.grads+=incoming_grads
     if len(self.grads)>0:
@@ -244,7 +272,12 @@ class tensor(list):
       #None happens if the tensor has no children. This could be the tensor where backward is called
       #if incomiing grad is not None, that means that it inherits its child's grad and adds to it, performing the chain rule
       self.grad=incoming_grad
-      context,func=self.grads[child_id]
+      try:
+        context,func=self.grads[child_id]
+      except:
+        print(self.grads)
+        print(get_by_id(child_id),'yeet')
+        raise
       func(self,context)
       del self.grads[child_id]
     elif len(self.grads)>0:
@@ -322,7 +355,7 @@ class tensor(list):
       return result
     return tensor(self.item.reshape(*new_shape),parents=(),requires_grad=False)
   def __str__(self):
-    return str(self.item)
+    return str(self.item)+f'id={self.id}, '+f'requires_grad={self.requires_grad}'
   def __repr__(self):
     return f'tensor({str(self.item)})'
   def __iter__(self):
@@ -378,7 +411,7 @@ if __name__ == '__main__':
   w=randn(3,7)
   pred=(a*w2)@w
   loss=mseloss(pred,target)
-  print('w',w)
+  '''print('w',w)
   print('################')
   print('a',a)
   print('###############')
@@ -388,12 +421,12 @@ if __name__ == '__main__':
   print('###############')
   print('loss', loss)
   print('###############')
-  print('###############')
+  print('###############')'''
   #print(loss,'loss\npreds', list(pred.grads.keys())[0])
   
   #print(loss.item==list(pred.grads.keys())[0].item)
   #print(loss)
-  loss.backward2()
+  print(timer(loss.backward2))
   print(a.gradv,'a')
   print('gfhsadgfhdsbfhasg')
   print(mm(loss,w.item.T)*w2)
